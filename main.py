@@ -1,10 +1,13 @@
 import os
+import json
 import asyncio
 import redis.asyncio as redis  # Use the async version
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 from sqlalchemy.future import select
+from redis.exceptions import ResponseError
 from database import engine, Base, get_db
 import models, schemas
 from dotenv import load_dotenv
@@ -32,6 +35,126 @@ redis_pubsub_client = redis.from_url(
 
 # Create the background task global variables
 pubsub_task = None
+worker_task = None  # NEW: holds the embedded worker loop
+
+# ============================================================
+# EMBEDDED WORKER — Runs inside FastAPI, no separate process!
+# ============================================================
+STREAM_KEY = "order_stream"
+GROUP_NAME = "flash_sale_group"
+CONSUMER_NAME = f"embedded_worker_{os.getpid()}"
+
+# Dedicated SQLAlchemy engine for the worker coroutine
+worker_engine = create_async_engine(os.getenv("DATABASE_URL"), echo=False)
+WorkerSession = sessionmaker(worker_engine, class_=AsyncSession, expire_on_commit=False)
+
+async def process_orders():
+    """The embedded order consumer. Runs as a background asyncio task inside FastAPI."""
+    print("🚀 Embedded Worker started. Waiting for messages on the queue...")
+
+    worker_redis = redis.from_url(os.getenv("REDIS_URL"), decode_responses=True)
+
+    # Ensure Consumer Group exists
+    try:
+        await worker_redis.xgroup_create(STREAM_KEY, GROUP_NAME, id="0", mkstream=True)
+        print(f"✅ Worker: Consumer Group '{GROUP_NAME}' ready.")
+    except ResponseError as e:
+        if "BUSYGROUP" not in str(e):
+            print(f"Worker Group Error: {e}")
+
+    try:
+        while True:
+            result = await worker_redis.xreadgroup(
+                GROUP_NAME, CONSUMER_NAME, {STREAM_KEY: ">"}, count=1, block=2000
+            )
+
+            if not result:
+                # block=2000 timed out — no new messages, loop again
+                continue
+
+            message_id = result[0][1][0][0]
+            payload_str = result[0][1][0][1]["payload"]
+            order_data = json.loads(payload_str)
+
+            user_id = order_data["user_id"]
+            product_id = order_data.get("product_id")
+            order_id = order_data.get("order_id")
+            items = order_data.get("items")
+
+            print(f"📦 Worker received payload from User {user_id}. Processing...")
+
+            # --- BULK CART CHECKOUT ---
+            if items is not None:
+                reservation_key = f"cart:{order_id}:items"
+                has_reservation = await worker_redis.exists(reservation_key)
+
+                if not has_reservation:
+                    print(f"⌛ Cart {order_id} expired! Discarding.")
+                    await worker_redis.xack(STREAM_KEY, GROUP_NAME, message_id)
+                    continue
+
+                async with WorkerSession() as db:
+                    try:
+                        async with db.begin():
+                            for pid in items:
+                                query = select(models.Product).where(models.Product.id == int(pid)).with_for_update()
+                                db_result = await db.execute(query)
+                                product = db_result.scalars().first()
+                                if product and product.stock > 0:
+                                    product.stock -= 1
+                                    db.add(models.Order(user_id=user_id, product_id=int(pid)))
+                                else:
+                                    print(f"⚠️ 0 stock for Product {pid}, skipping.")
+                        await worker_redis.xack(STREAM_KEY, GROUP_NAME, message_id)
+                        await worker_redis.delete(reservation_key)
+                        print(f"✅ Bulk Cart {order_id} processed and saved to DB.")
+                    except Exception as e:
+                        print(f"❌ DB Error (bulk): {e}")
+                        await asyncio.sleep(1)
+                continue
+
+            # --- SINGLE ITEM ORDER (legacy) ---
+            if order_id:
+                reservation_key = f"reservation:{order_id}"
+            else:
+                reservation_key = f"reservation:{user_id}:{product_id}"
+
+            has_reservation = await worker_redis.exists(reservation_key)
+            if not has_reservation:
+                print(f"⌛ Reservation for Product {product_id} expired! Discarding.")
+                await worker_redis.xack(STREAM_KEY, GROUP_NAME, message_id)
+                continue
+
+            async with WorkerSession() as db:
+                try:
+                    async with db.begin():
+                        query = select(models.Product).where(models.Product.id == product_id).with_for_update()
+                        db_result = await db.execute(query)
+                        product = db_result.scalars().first()
+
+                        if product and product.stock > 0:
+                            product.stock -= 1
+                            db.add(models.Order(user_id=user_id, product_id=product_id))
+                            await worker_redis.xack(STREAM_KEY, GROUP_NAME, message_id)
+                            await worker_redis.delete(reservation_key)
+                            print(f"✅ Order for Product {product_id} saved to DB.")
+                        else:
+                            print(f"⚠️ 0 stock in DB for Product {product_id}. Rolling back Redis.")
+                            new_stock = await worker_redis.incr(f"stock:{product_id}")
+                            await worker_redis.publish(
+                                "stock_updates",
+                                json.dumps({"product_id": product_id, "stock": new_stock})
+                            )
+                            await worker_redis.xack(STREAM_KEY, GROUP_NAME, message_id)
+                            await worker_redis.delete(reservation_key)
+                except Exception as e:
+                    print(f"❌ DB Error (single): {e}")
+                    await asyncio.sleep(1)
+
+    except asyncio.CancelledError:
+        print("🛑 Embedded Worker shutting down...")
+    finally:
+        await worker_redis.aclose()
 
 async def redis_pubsub_listener():
     # Upstash Serverless Redis occasionally drops connections. 
@@ -141,18 +264,26 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"❌ Redis Initial Connection Failed (will try to auto-reconnect): {e}")
         
-    # Always start the Background PubSub listener regardless of the initial ping
-    global pubsub_task
+    # 3. Start background tasks: PubSub listener + Embedded Worker
+    global pubsub_task, worker_task
     pubsub_task = asyncio.create_task(redis_pubsub_listener())
+    worker_task = asyncio.create_task(process_orders())
     
     yield
     
     # --- SHUTDOWN ---
     if pubsub_task:
         pubsub_task.cancel()
+    if worker_task:
+        worker_task.cancel()
+        try:
+            await worker_task
+        except asyncio.CancelledError:
+            pass
     await redis_client.close()
     await redis_pubsub_client.close()
     print("Server shutting down...")
+
 
 app = FastAPI(title="Pro Flash Sale Engine", lifespan=lifespan)
 

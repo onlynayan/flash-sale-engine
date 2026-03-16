@@ -96,13 +96,14 @@ Each layer handles a different concern. Read on to understand each one.
 ```
 flash-sale-engine/
 │
-├── main.py          # 🧠 The brain: All FastAPI routes, Redis logic, timers
-├── worker.py        # 👷 The muscle: Consumes from Redis Stream, writes to Oracle
+├── main.py          # 🧠 The brain: All FastAPI routes, Redis logic, timers,
+│                   #    AND the embedded order worker (runs as asyncio task)
+├── worker.py        # 👷 Optional standalone worker: use this to run the consumer
+│                   #    as a completely separate process for horizontal scaling
 ├── database.py      # 🗄️ Database engine setup and session factory
 ├── models.py        # 📐 SQLAlchemy table definitions (ORM models)
 ├── schemas.py       # ✅ Pydantic request/response validation schemas
 ├── sync_all.py      # 🔄 Admin script: syncs Oracle stock → Redis on startup
-├── load_test.py     # 🔥 Load testing script to simulate traffic spikes
 │
 ├── templates/
 │   └── index.html   # 🖥️ The HTML shell of the entire frontend
@@ -112,9 +113,9 @@ flash-sale-engine/
 │   └── app.js       # ⚙️ All client-side logic (cart, WebSocket, pagination)
 │
 ├── .env             # 🔑 Secret keys (Redis URL, DB URL) — never commit this!
+├── .env.example     # 📋 Template showing which variables are needed
 ├── requirements.txt # 📦 All Python dependencies
-├── Dockerfile       # 🐳 Container definition for production deployment
-└── docker-compose.yml # 🐳 Multi-container orchestration
+└── README.md        # 📖 This file
 ```
 
 ---
@@ -319,9 +320,32 @@ We use a **Consumer Group** so that multiple worker instances can share the same
 
 ## 9. Core Concept 5 — The Background Worker
 
-The **worker** (`worker.py`) is a completely separate Python process from the FastAPI server. You start it with `python worker.py` in a different terminal.
+The project supports **two deployment modes** for the order consumer:
 
-It runs an infinite loop, blocked on `xreadgroup(..., block=0)` until a new order appears on the stream.
+### Mode A — Embedded Worker (Default, Recommended for single-server)
+
+The `process_orders()` coroutine runs **inside `main.py`** as an `asyncio.create_task()`. It starts automatically when FastAPI starts and shares the same process.
+
+```python
+# In main.py lifespan startup:
+worker_task = asyncio.create_task(process_orders())
+```
+
+**Advantage:** Only ONE command needed to run the entire system.
+**Trade-off:** If the API process dies, the worker dies too.
+
+### Mode B — Standalone Worker (`worker.py`) for Horizontal Scaling
+
+For production at scale (e.g., high-traffic events), you can run `worker.py` as a completely separate process — or even on a separate server entirely. Multiple worker instances can all consume from the same Redis Stream simultaneously, and Redis ensures **each message is delivered to only one worker** (via Consumer Groups).
+
+```
+ API Server × 2          Worker Process × 5
+[main.py]  [main.py]    [worker.py] [worker.py] [worker.py]
+     ↓           ↓            ↓           ↓           ↓
+          Redis Stream (order_stream)
+                         ↓
+                    Oracle Database
+```
 
 ### Two Types of Payloads the Worker Handles
 
@@ -330,7 +354,7 @@ It runs an infinite loop, blocked on `xreadgroup(..., block=0)` until a new orde
 {"order_id": "abc-123", "user_id": 1, "product_id": 14}
 ```
 
-**Type 2: New bulk cart checkout (Phase 9)**
+**Type 2: New bulk cart checkout**
 ```json
 {"order_id": "cart-uuid", "user_id": 1, "items": ["14", "7"]}
 ```
@@ -981,24 +1005,38 @@ DATABASE_URL=oracle+oracledb://<user>:<password>@<host>:<port>/?service_name=<se
 
 ### Running
 
-You need **two terminal windows** running simultaneously:
+#### ✅ Mode A: Single Process (Recommended — Worker is embedded in main.py)
 
-**Terminal 1 — Start the FastAPI server:**
+Just **one command** starts everything: the API, WebSocket listener, watchdog timers, AND the order consumer:
+
 ```bash
 uvicorn main:app --reload
 ```
 
-**Terminal 2 — Start the Background Worker:**
-```bash
-python worker.py
-```
-
-**Optional — Sync Oracle stock to Redis:**
+**Optional — Sync Oracle stock to Redis after startup:**
 ```bash
 python sync_all.py
 ```
 
 Open your browser at: **http://127.0.0.1:8000/display**
+
+---
+
+#### ⚙️ Mode B: Separate Processes (For Horizontal Scaling)
+
+If you want to run multiple worker instances independently (e.g., for load testing or production scaling), use two terminals:
+
+**Terminal 1 — FastAPI server (with embedded worker disabled in `main.py`):**
+```bash
+uvicorn main:app --reload
+```
+
+**Terminal 2 — Standalone worker:**
+```bash
+python worker.py
+```
+
+Both will share the same Redis Stream. Redis distributes messages so each order is processed exactly once.
 
 ---
 
