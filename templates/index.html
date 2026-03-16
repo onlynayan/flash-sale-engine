@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>Flash Sale Station Display</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css?v=6">
+</head>
+
+<body>
+    <!-- Top Navigation Bar -->
+    <nav class="navbar">
+        <h1>Flash Sale! ⚡</h1>
+        <button class="nav-cart-btn" onclick="toggleCart()">
+            🛒 Your Cart <span id="cart-count-badge" class="badge">0</span>
+        </button>
+    </nav>
+
+    <!-- The Beautiful Hero Banner Slider -->
+    <div class="hero-banner">
+        <div class="hero-content">
+            <h2>The Biggest Flash Sale of 2026</h2>
+            <p>Up to 80% off select hardware. Hurry, stock is extremely limited!</p>
+        </div>
+    </div>
+
+    <!-- Main Container slightly overlapping the banner -->
+    <div class="main-container overlap-container">
+        <!-- Main Product Grid -->
+        <div id="catalog">
+            <div class="loader-container">
+                <div class="spinner"></div>
+                Loading Catalog...
+            </div>
+        </div>
+
+        <!-- Pagination Controls -->
+        <div id="pagination-controls" class="pagination-container">
+            <!-- Buttons will be injected here by JS -->
+        </div>
+    </div>
+
+    <!-- The Shopping Cart Drawer (Slides from Right) -->
+    <div id="cart-drawer" class="cart-drawer">
+        <div class="cart-drawer-header">
+            <h2 class="cart-title">🛒 Your Cart</h2>
+            <button class="close-cart-btn" onclick="toggleCart()">✕</button>
+        </div>
+        
+        <div id="timer-display" class="timer-hidden">
+            ⏳ Time left: <span id="time-left" class="urgency-pulse">00:40</span>
+        </div>
+
+        <div id="cart-items">
+            <div class="empty-cart-msg">Your cart is empty.</div>
+        </div>
+
+        <button id="checkout-btn" class="checkout-btn" onclick="checkoutCart()" style="display: none;">Complete Payment</button>
+    </div>
+
+    <!-- Professional Footer -->
+    <footer class="site-footer">
+        <div class="footer-content">
+            <div class="footer-section">
+                <h3>About Us</h3>
+                <p>Pro Flash Sale Engine is a bleeding-edge architectural demonstration of Redis, FastAPI, and WebSockets scaling to millions of concurrent operations.</p>
+            </div>
+            <div class="footer-section">
+                <h3>Customer Service</h3>
+                <a href="#">Contact Us</a>
+                <a href="#">Returns & Refunds</a>
+                <a href="#">Shipping Info</a>
+            </div>
+            <div class="footer-section">
+                <h3>Legal</h3>
+                <a href="#">Terms of Service</a>
+                <a href="#">Privacy Policy</a>
+            </div>
+        </div>
+        <div class="footer-bottom">
+            <p>&copy; 2026 Flash Sale Inc. All rights reserved.</p>
+        </div>
+    </footer>
+
+    <!-- Add SweetAlert2 for beautiful Toast Notifications -->
+    <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script>
+    <script src="/static/app.js?v=6"></script>
+</body>
+
+</html>
