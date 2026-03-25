@@ -252,10 +252,12 @@ async def bulk_reservation_rollback_timer(cart_id: str):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # --- STARTUP ---
-    print("Connecting to Oracle Database...")
+    _db_url = os.getenv("DATABASE_URL", "")
+    _db_type = "PostgreSQL" if "postgresql" in _db_url else "Oracle"
+    print(f"Connecting to {_db_type} Database...")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
-    print("✅ Database tables verified/created.")
+    print(f"✅ {_db_type} tables verified/created.")
 
     # 2. Test Redis Connection during startup
     try:
@@ -263,13 +265,29 @@ async def lifespan(app: FastAPI):
         print("✅ Successfully connected to Upstash Redis!")
     except Exception as e:
         print(f"❌ Redis Initial Connection Failed (will try to auto-reconnect): {e}")
+
+    # 3. AUTO-SYNC: Push current DB stock → Redis on every startup.
+    #    Optimized with Pipeline for large catalogs (40k+ products).
+    print(f"🔄 Syncing {_db_type} stock → Redis...")
+    async with AsyncSession(engine) as sync_session:
+        result = await sync_session.execute(select(models.Product))
+        all_products = result.scalars().all()
         
-    # 3. Start background tasks: PubSub listener + Embedded Worker
+        # Use a pipeline to avoid 40,000 round-trips!
+        pipe = redis_client.pipeline()
+        for product in all_products:
+            pipe.set(f"stock:{product.id}", product.stock)
+        await pipe.execute()
+        
+        print(f"✅ Synced {len(all_products)} products from {_db_type} → Redis.")
+
+    # 4. Start background tasks: PubSub listener + Embedded Worker
     global pubsub_task, worker_task
     pubsub_task = asyncio.create_task(redis_pubsub_listener())
     worker_task = asyncio.create_task(process_orders())
     
     yield
+
     
     # --- SHUTDOWN ---
     if pubsub_task:

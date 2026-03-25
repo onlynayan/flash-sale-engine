@@ -58,23 +58,48 @@ async function loadCatalog(page = 1) {
 
 function renderPagination(currentPage, totalPages) {
     const container = document.getElementById("pagination-controls");
-    if (!container) return;
-    
-    let html = "";
-    
-    // Prev Button
-    html += `<button class="page-btn" ${currentPage <= 1 ? 'disabled' : ''} onclick="changePage(${currentPage - 1})">Previous</button>`;
-    
-    // Page Numbers
-    for(let i = 1; i <= totalPages; i++) {
-        html += `<button class="page-btn ${i === currentPage ? 'active' : ''}" onclick="changePage(${i})">${i}</button>`;
+    if (!container || totalPages <= 1) {
+        if (container) container.innerHTML = "";
+        return;
     }
-    
-    // Next Button
-    html += `<button class="page-btn" ${currentPage >= totalPages ? 'disabled' : ''} onclick="changePage(${currentPage + 1})">Next</button>`;
-    
+
+    // Build the window of pages around current page
+    const WINDOW = 2; // pages to show on each side of current
+    let pages = new Set();
+
+    // Always include first and last
+    pages.add(1);
+    pages.add(totalPages);
+
+    // Add window around current page
+    for (let i = Math.max(1, currentPage - WINDOW); i <= Math.min(totalPages, currentPage + WINDOW); i++) {
+        pages.add(i);
+    }
+
+    // Sort the page set into an array
+    const sorted = Array.from(pages).sort((a, b) => a - b);
+
+    let html = "";
+
+    // Prev button
+    html += `<button class="page-btn" ${currentPage <= 1 ? 'disabled' : ''} onclick="changePage(${currentPage - 1})">&#8592; Prev</button>`;
+
+    // Page number buttons with ellipsis gaps
+    let prev = 0;
+    for (const page of sorted) {
+        if (prev && page - prev > 1) {
+            html += `<span class="page-ellipsis">…</span>`;
+        }
+        html += `<button class="page-btn ${page === currentPage ? 'active' : ''}" onclick="changePage(${page})">${page}</button>`;
+        prev = page;
+    }
+
+    // Next button
+    html += `<button class="page-btn" ${currentPage >= totalPages ? 'disabled' : ''} onclick="changePage(${currentPage + 1})">Next &#8594;</button>`;
+
     container.innerHTML = html;
 }
+
 
 function changePage(newPage) {
     currentPage = newPage;
@@ -374,6 +399,10 @@ async function checkoutCart() {
             timerStarted = false;
             timeRemaining = 40;
             updateCartUI();
+            
+            // FIX: Re-enable the button for the next order!
+            checkoutBtn.disabled = false;
+            checkoutBtn.innerText = "Complete Payment";
             
             document.getElementById("cart-count-badge").innerText = "0";
             document.getElementById("cart-drawer").classList.remove("open");
